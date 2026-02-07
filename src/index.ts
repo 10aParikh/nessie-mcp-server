@@ -8,102 +8,87 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// --- CONFIGURATION ---
 const app = express();
 app.use(cors());
 
 const PORT = process.env.PORT || 3000;
 const NESSIE_API_KEY = process.env.NESSIE_API_KEY;
-const NESSIE_BASE_URL = "http://api.nessieisreal.com";
+const BASE_URL = "http://api.nessieisreal.com";
 
 if (!NESSIE_API_KEY) {
-  console.error("Error: NESSIE_API_KEY is missing.");
+  console.warn("WARNING: NESSIE_API_KEY is not set.");
 }
 
-// --- INITIALIZE MCP SERVER ---
 const mcpServer = new McpServer({
   name: "NessieBankAgent",
   version: "1.0.0",
 });
 
-// --- HELPER FUNCTION ---
 async function callNessie(method: string, endpoint: string, data?: any) {
   try {
     const response = await axios({
       method,
-      url: `${NESSIE_BASE_URL}${endpoint}`,
+      url: `${BASE_URL}${endpoint}`,
       params: { key: NESSIE_API_KEY },
       data,
       headers: { "Content-Type": "application/json" }
     });
     return response.data;
   } catch (error: any) {
-    // Return error as data so the AI knows what went wrong
     return { error: error.response?.data || error.message };
   }
 }
 
-// --- DEFINE TOOLS ---
+// --- TOOLS ---
 
-// Tool 1: Get Customer Accounts
 mcpServer.tool(
   "get_customer_accounts",
-  "Get all bank accounts for a specific customer ID",
-  { customerId: z.string().describe("The Customer ID (e.g., 64e3f...)") },
+  "Get all accounts for a specific customer",
+  { customerId: z.string() },
   async ({ customerId }) => {
     const data = await callNessie("GET", `/customers/${customerId}/accounts`);
     if (data.error) return { content: [{ type: "text", text: `Error: ${JSON.stringify(data.error)}` }] };
     
-    // Format the output for the AI to read easily
-    const summary = data.map((acc: any) => 
-      `- ${acc.nickname} (${acc.type}): $${acc.balance} (ID: ${acc._id})`
-    ).join("\n");
+    const summary = Array.isArray(data) 
+      ? data.map((acc: any) => `- ${acc.nickname} (${acc.type}): $${acc.balance} (ID: ${acc._id})`).join("\n")
+      : JSON.stringify(data);
 
-    return {
-      content: [{ type: "text", text: `Accounts found:\n${summary}` }],
-    };
+    return { content: [{ type: "text", text: `Accounts:\n${summary}` }] };
   }
 );
 
-// Tool 2: Transfer Money
 mcpServer.tool(
   "transfer_money",
-  "Transfer funds between two accounts",
+  "Transfer money between accounts",
   {
-    payerId: z.string().describe("ID of the source account"),
-    payeeId: z.string().describe("ID of the destination account"),
-    amount: z.number().describe("Amount to transfer"),
+    payerId: z.string(),
+    payeeId: z.string(),
+    amount: z.number(),
   },
   async ({ payerId, payeeId, amount }) => {
     const payload = {
       medium: "balance",
       payee_id: payeeId,
-      amount: amount,
+      amount,
       transaction_date: new Date().toISOString().split("T")[0],
     };
-
     const data = await callNessie("POST", `/accounts/${payerId}/transfers`, payload);
-    
-    if (data.error) return { content: [{ type: "text", text: `Transfer Failed: ${JSON.stringify(data.error)}` }] };
-
-    return {
-      content: [{ type: "text", text: `Transfer Successful: ${data.message}\nTransferred $${amount} from ${payerId} to ${payeeId}.` }],
-    };
+    if (data.error) return { content: [{ type: "text", text: `Failed: ${JSON.stringify(data.error)}` }] };
+    return { content: [{ type: "text", text: `Success: ${data.message}` }] };
   }
 );
 
-// --- SSE TRANSPORT (REQUIRED FOR DEDALUS) ---
+// --- DEDALUS REQUIRED ROUTES ---
 
-// 1. The stream endpoint Dedalus connects to
-app.get("/sse", async (req, res) => {
-  console.log("Dedalus connected via SSE");
+// 1. The entry point MUST be named /mcp for Dedalus validation
+app.get("/mcp", async (req, res) => {
   const transport = new SSEServerTransport("/messages", res);
   await mcpServer.connect(transport);
 });
 
-// 2. The message handler for incoming requests
+// 2. The message handler
 app.post("/messages", async (req, res) => {
-  // The SSE transport handles the session; we just need to acknowledge the POST
+  await mcpServer.handleMessage(req.body); // Keep this standard
   res.sendStatus(200);
 });
 
